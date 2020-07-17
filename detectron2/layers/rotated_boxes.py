@@ -1,7 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-from detectron2 import _C
+# from detectron2 import _C
 
 
 def pairwise_iou_rotated(boxes1, boxes2):

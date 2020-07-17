@@ -4,7 +4,7 @@ import numpy as np
 import time
 from pycocotools.cocoeval import COCOeval
 
-from detectron2 import _C
+# from detectron2 import _C
 
 
 class COCOeval_opt(COCOeval):

@@ -184,7 +184,7 @@ setup(
         "tqdm>4.29.0",
         "tensorboard",
         "fvcore>=0.1.1",
-        "pycocotools>=2.0.1",
+        # "pycocotools>=2.0.1",
         "future",  # used by caffe2
         "pydot",  # used to save caffe2 SVGs
     ],
@@ -198,6 +198,6 @@ setup(
             "flake8-comprehensions",
         ],
     },
-    ext_modules=get_extensions(),
+    ext_modules=[],
     cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
 )
