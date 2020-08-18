@@ -370,6 +370,49 @@ class RotatedAnchorGenerator(nn.Module):
         return [RotatedBoxes(x) for x in anchors_over_all_feature_maps]
 
 
+@ANCHOR_GENERATOR_REGISTRY.register()
+class AnchorPointGenerator(nn.Module):
+
+    @configurable
+    def __init__(self, *, strides, offset=0.5):
+        """
+            This interface is experimental
+        """
+        super().__init__()
+
+        self.strides = strides
+        self.offset = offset
+
+    @classmethod
+    def from_config(cls, cfg, input_shape: List[ShapeSpec]):
+        return {
+            "strides": [x.stride for x in input_shape],
+            "offset": cfg.MODEL.ANCHOR_GENERATOR.OFFSET,
+        }
+
+    def _grid_points(self, grid_sizes, device: torch.device):
+        points = []
+        for size, stride in zip(grid_sizes, self.strides):
+            x, y = _create_grid_offsets(size, stride, self.offset, device)
+            points.append(torch.stack([x, y], dim=-1))
+        return points
+
+    def forward(self, features: List[torch.Tensor]):
+        """
+        Args:
+            features (list[Tensor]): list of backbone feature maps on which to generate anchors.
+
+        Returns:
+            list[Boxes]: a list of Boxes containing all the anchors for each feature map
+                (i.e. the cell anchors repeated over all locations in the feature map).
+                The number of anchors of each feature map is Hi x Wi x num_cell_anchors,
+                where Hi, Wi are resolution of the feature map divided by anchor stride.
+        """
+        grid_sizes = [feature_map.shape[-2:] for feature_map in features]
+        points_over_all_feature_maps = self._grid_points(grid_sizes, features[0].device)
+        return points_over_all_feature_maps
+
+
 def build_anchor_generator(cfg, input_shape):
     """
     Built an anchor generator from `cfg.MODEL.ANCHOR_GENERATOR.NAME`.
