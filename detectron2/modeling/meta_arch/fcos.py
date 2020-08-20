@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from detectron2.data.detection_utils import convert_image_to_rgb
-from detectron2.layers import ShapeSpec, batched_nms, cat
+from detectron2.layers import ShapeSpec, batched_nms, cat, DFConv2d, Scale
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 
@@ -75,13 +75,13 @@ class FCOS(nn.Module):
         self.anchor_generator = build_anchor_generator(cfg, feature_shapes)
         self.feature_shapes = feature_shapes
 
-        # Matching and loss
-        self.box2box_transform = Box2BoxTransform(weights=cfg.MODEL.RPN.BBOX_REG_WEIGHTS)
-        self.anchor_matcher = Matcher(
-            cfg.MODEL.FCOS.IOU_THRESHOLDS,
-            cfg.MODEL.FCOS.IOU_LABELS,
-            allow_low_quality_matches=True,
-        )
+        # # Matching and loss
+        # self.box2box_transform = Box2BoxTransform(weights=cfg.MODEL.RPN.BBOX_REG_WEIGHTS)
+        # self.anchor_matcher = Matcher(
+        #     cfg.MODEL.FCOS.IOU_THRESHOLDS,
+        #     cfg.MODEL.FCOS.IOU_LABELS,
+        #     allow_low_quality_matches=True,
+        # )
 
         self.register_buffer("pixel_mean", torch.Tensor(cfg.MODEL.PIXEL_MEAN).view(-1, 1, 1))
         self.register_buffer("pixel_std", torch.Tensor(cfg.MODEL.PIXEL_STD).view(-1, 1, 1))
@@ -245,14 +245,16 @@ class FCOS(nn.Module):
         )
         pred_boxes_pos = pred_boxes[pos_mask]
         gt_boxes_pos = gt_boxes[pos_mask]
-        if not torch.isfinite(pred_boxes_pos).all() or not torch.isfinite(gt_boxes_pos).all():
-            print(pred_boxes_pos)
-            print(gt_boxes_pos)
+        reg_weight = gt_centerness[pos_mask].flatten()
+        # if not torch.isfinite(pred_boxes_pos).all() or not torch.isfinite(gt_boxes_pos).all():
+        #     print(pred_boxes_pos)
+        #     print(gt_boxes_pos)
         loss_box_reg = giou_loss(
             pred_boxes_pos,
             gt_boxes_pos,
-            reduction="sum"
+            reduction="none"
         )
+        loss_box_reg = (reg_weight * loss_box_reg).sum()
         loss_centerness = F.binary_cross_entropy_with_logits(
             pred_centerness[pos_mask],
             gt_centerness[pos_mask],
@@ -264,7 +266,8 @@ class FCOS(nn.Module):
         }
 
     def transfer_boxes(self, points, deltas, strides=1):
-        deltas = torch.exp(deltas) * strides
+        # deltas = torch.exp(deltas) * strides
+        deltas = F.relu(deltas) * strides
         boxes_tl = points - deltas[..., :2]
         boxes_br = points + deltas[..., 2:]
         return torch.cat([boxes_tl, boxes_br], dim=-1)
@@ -468,14 +471,17 @@ class FCOSHead(nn.Module):
 
         cls_subnet = []
         bbox_subnet = []
-        for _ in range(num_convs):
+        for i in range(num_convs):
+            conv_func = nn.Conv2d if i < num_convs - 1 else DFConv2d
             cls_subnet.append(
-                nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+                conv_func(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
             )
+            cls_subnet.append(nn.GroupNorm(32, in_channels))
             cls_subnet.append(nn.ReLU())
             bbox_subnet.append(
-                nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+                conv_func(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
             )
+            bbox_subnet.append(nn.GroupNorm(32, in_channels))
             bbox_subnet.append(nn.ReLU())
 
         self.cls_subnet = nn.Sequential(*cls_subnet)
@@ -496,6 +502,8 @@ class FCOSHead(nn.Module):
         # Use prior in model initialization to improve stability
         bias_value = -(math.log((1 - prior_prob) / prior_prob))
         torch.nn.init.constant_(self.cls_score.bias, bias_value)
+
+        self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(len(input_shape))])
 
     def forward(self, features):
         """
@@ -518,9 +526,10 @@ class FCOSHead(nn.Module):
         logits = []
         bbox_reg = []
         centerness = []
-        for feature in features:
-            feat = self.cls_subnet(feature)
-            logits.append(self.cls_score(feat))
-            centerness.append(self.centerness(feat))
-            bbox_reg.append(self.bbox_pred(self.bbox_subnet(feature)))
+        for l, feature in enumerate(features):
+            lgt_feat = self.cls_subnet(feature)
+            logits.append(self.cls_score(lgt_feat))
+            reg_feat = self.bbox_subnet(feature)
+            bbox_reg.append(self.scales[l](self.bbox_pred(reg_feat)))
+            centerness.append(self.centerness(reg_feat))
         return logits, bbox_reg, centerness
