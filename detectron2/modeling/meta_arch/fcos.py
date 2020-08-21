@@ -292,11 +292,16 @@ class FCOS(nn.Module):
                 feature maps. The values are the matched gt boxes for each anchor.
                 Values are undefined for those anchors not labeled as foreground.
         """
+        radius_scale = 1.5
         szr = [0, 64, 128, 256, 512, 1 << 30]
         size_range = [torch.ones_like(p) * p.new_tensor([szr[i], szr[i + 1]])
                       for i, p in enumerate(points)]
+        strides = [x.stride for x in self.feature_shapes]
+        center_radius = [torch.ones_like(p) * p.new_tensor([strides[i], strides[i]]) * radius_scale
+                         for i, p in enumerate(points)]
         points = torch.cat(points, dim=0)
         size_range = torch.cat(size_range, dim=0)
+        center_radius = torch.cat(center_radius, dim=0)
 
         def sort_instances_by_area(instances):
             if len(instances) <= 1:
@@ -326,6 +331,14 @@ class FCOS(nn.Module):
                 d = (max_sz >= size_range[:, None, 0]) & \
                     (max_sz <= size_range[:, None, 1]) & \
                     (min_sz > 0)
+
+                # center sampling
+                center = (gt_per_image.gt_boxes.tensor[:, :2] +
+                          gt_per_image.gt_boxes.tensor[:, 2:]) / 2
+                pp = points[:, None, :] > (center - center_radius[:, None, :])
+                qq = points[:, None, :] < (center + center_radius[:, None, :])
+                in_center = pp[:, :, 0] & pp[:, :, 1] & qq[:, :, 0] & qq[:, :, 1]
+                d = d & in_center
 
                 matched_vals, matched_idxs = torch.max(d.to(dtype=torch.uint8), dim=-1)
 
