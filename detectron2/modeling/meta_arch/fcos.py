@@ -65,6 +65,8 @@ class FCOS(nn.Module):
         # Vis parameters
         self.vis_period = cfg.VIS_PERIOD
         self.input_format = cfg.INPUT.FORMAT
+        # Positive sample
+        self.atss_positive_sample = cfg.MODEL.FCOS.ATSS_POSITIVE_SAMPLE
         # fmt: on
 
         self.backbone = build_backbone(cfg)
@@ -167,7 +169,10 @@ class FCOS(nn.Module):
             assert "instances" in batched_inputs[0], "Instance annotations are missing in training!"
             gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
 
-            gt_labels, gt_boxes, gt_centerness = self.label_points(points, gt_instances)
+            if self.atss_positive_sample:
+                gt_labels, gt_boxes, gt_centerness = self.label_points_atss(points, gt_instances)
+            else:
+                gt_labels, gt_boxes, gt_centerness = self.label_points(points, gt_instances)
             losses = self.losses(points, pred_logits, gt_labels, pred_anchor_deltas, gt_boxes,
                                  pred_centerness, gt_centerness)
 
@@ -328,9 +333,10 @@ class FCOS(nn.Module):
                 ltrb = torch.cat([lt, rb], dim=-1)
                 max_sz, _ = ltrb.max(dim=-1)
                 min_sz, _ = ltrb.min(dim=-1)
-                d = (max_sz >= size_range[:, None, 0]) & \
-                    (max_sz <= size_range[:, None, 1]) & \
-                    (min_sz > 0)
+                in_box = (min_sz > 0)
+                in_range = (max_sz >= size_range[:, None, 0]) & \
+                           (max_sz <= size_range[:, None, 1])
+                is_pos = in_range & in_box
 
                 # center sampling
                 center = (gt_per_image.gt_boxes.tensor[:, :2] +
@@ -338,9 +344,98 @@ class FCOS(nn.Module):
                 pp = points[:, None, :] > (center - center_radius[:, None, :])
                 qq = points[:, None, :] < (center + center_radius[:, None, :])
                 in_center = pp[:, :, 0] & pp[:, :, 1] & qq[:, :, 0] & qq[:, :, 1]
-                d = d & in_center
+                is_pos = is_pos & in_center
 
-                matched_vals, matched_idxs = torch.max(d.to(dtype=torch.uint8), dim=-1)
+                matched_vals, matched_idxs = torch.max(is_pos.to(dtype=torch.uint8), dim=-1)
+
+                adx = torch.arange(points.shape[0])
+                gt_delta_i = ltrb[adx, matched_idxs]
+                gt_boxes_i = gt_per_image.gt_boxes.tensor[matched_idxs]
+
+                gt_labels_i = gt_per_image.gt_classes[matched_idxs]
+                # Anchors with label 0 are treated as background.
+                gt_labels_i[matched_vals == 0] = self.num_classes
+                # Anchors with label -1 are ignored.
+                pass
+
+                min_lr, _ = gt_delta_i[:, [0, 2]].min(dim=-1)
+                max_lr, _ = gt_delta_i[:, [0, 2]].max(dim=-1)
+                min_tb, _ = gt_delta_i[:, [1, 3]].min(dim=-1)
+                max_tb, _ = gt_delta_i[:, [1, 3]].max(dim=-1)
+                gt_centerness_i = torch.sqrt((min_lr / max_lr) * (min_tb / max_tb))
+
+            else:
+                num = points.shape[0]
+                gt_boxes_i = points.new_zeros([num, 4])
+                gt_labels_i = points.new_zeros([num]) + self.num_classes
+                gt_centerness_i = points.new_zeros([num])
+
+            gt_labels.append(gt_labels_i)
+            gt_boxes.append(gt_boxes_i)
+            gt_centerness.append(gt_centerness_i)
+
+        return gt_labels, gt_boxes, gt_centerness
+
+    @torch.no_grad()
+    def label_points_atss(self, points, gt_instances):
+        """
+        Args:
+            points (list[Tensor]): A list of #feature level Boxes.
+                The Boxes contains anchors of this image on the specific feature level.
+            gt_instances (list[Instances]): a list of N `Instances`s. The i-th
+                `Instances` contains the ground-truth per-instance annotations
+                for the i-th input image.
+
+        Returns:
+            list[Tensor]:
+                List of #img tensors. i-th element is a vector of labels whose length is
+                the total number of anchors across all feature maps (sum(Hi * Wi * A)).
+                Label values are in {-1, 0, ..., K}, with -1 means ignore, and K means background.
+            list[Tensor]:
+                i-th element is a Rx4 tensor, where R is the total number of anchors across
+                feature maps. The values are the matched gt boxes for each anchor.
+                Values are undefined for those anchors not labeled as foreground.
+        """
+        num_points_per_level = [p.shape[0] for p in points]
+        anchor_size = (64, 128, 256, 512, 1024)
+        anchors = [torch.cat([p - s / 2, p + s / 2], dim=-1)
+                   for p, s in zip(points, anchor_size)]
+        points = torch.cat(points, dim=0)
+        anchors = torch.cat(anchors, dim=0)
+
+        gt_labels = []
+        gt_boxes = []
+        gt_centerness = []
+        for gt_per_image in gt_instances:
+            if len(gt_per_image) > 0:
+                # select valid predictions
+                lt = points[:, None, :] - gt_per_image.gt_boxes.tensor[:, :2]
+                rb = gt_per_image.gt_boxes.tensor[:, 2:] - points[:, None, :]
+                ltrb = torch.cat([lt, rb], dim=-1)
+                max_sz, _ = ltrb.max(dim=-1)
+                min_sz, _ = ltrb.min(dim=-1)
+                in_box = (min_sz > 0)
+
+                # atss sampling
+                distance_sq = ((rb - lt) ** 2).sum(dim=-1)
+                candidate_idxs = []
+                begin = 0
+                for num in num_points_per_level:
+                    end = begin + num
+                    _, idx = distance_sq[begin:end].topk(min(9, num), dim=0, largest=False)
+                    candidate_idxs.append(idx + begin)
+                    begin = end
+                candidate_idxs = torch.cat(candidate_idxs, dim=0)
+
+                # Using the sum of mean and standard deviation as the IoU threshold to select final positive samples
+                ious = pairwise_iou(Boxes(anchors), gt_per_image.gt_boxes)
+                candidate_ious = ious[candidate_idxs, torch.arange(len(gt_per_image))]
+                iou_mean_per_gt = candidate_ious.mean(0)
+                iou_std_per_gt = candidate_ious.std(0)
+                iou_thresh_per_gt = iou_mean_per_gt + iou_std_per_gt
+                ious = ((ious >= iou_thresh_per_gt[None, :]) & in_box).float() * ious
+
+                matched_vals, matched_idxs = torch.max(ious, dim=-1)
 
                 adx = torch.arange(points.shape[0])
                 gt_delta_i = ltrb[adx, matched_idxs]
