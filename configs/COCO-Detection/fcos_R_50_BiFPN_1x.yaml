@@ -1,0 +1,17 @@
+_BASE_: "../Base-FCOS.yaml"
+MODEL:
+  BACKBONE:
+    NAME: "build_fcos_resnet_bifpn_backbone"
+  WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  MASK_ON: False
+  RESNETS:
+    DEPTH: 50
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+    OUT_CHANNELS: 160
+    NUM_REPEATS: 6
+    TOP_LEVELS: 2  # p6, p7
+    NORM: "GN"
+SOLVER:
+  STEPS: (60000, 80000)
+  MAX_ITER: 90000

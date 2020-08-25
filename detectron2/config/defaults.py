@@ -149,6 +149,22 @@ _C.MODEL.FPN.NORM = ""
 # Types for fusing the FPN top-down and lateral features. Can be either "sum" or "avg"
 _C.MODEL.FPN.FUSE_TYPE = "sum"
 
+# ---------------------------------------------------------------------------- #
+# BiFPN options
+# ---------------------------------------------------------------------------- #
+
+_C.MODEL.BiFPN = CN()
+# Names of the input feature maps to be used by BiFPN
+# They must have contiguous power of 2 strides
+# e.g., ["res3", "res4", "res5"]
+_C.MODEL.BiFPN.IN_FEATURES = ["res3", "res4", "res5"]
+_C.MODEL.BiFPN.OUT_CHANNELS = 160
+_C.MODEL.BiFPN.NUM_REPEATS = 6
+_C.MODEL.BiFPN.TOP_LEVELS = 2
+
+# Options: "" (no norm), "GN"
+_C.MODEL.BiFPN.NORM = ""
+
 
 # ---------------------------------------------------------------------------- #
 # Proposal generator options
